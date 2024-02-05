@@ -54,6 +54,7 @@ import java.time.temporal.ChronoUnit
 import java.util.*
 import java.util.concurrent.*
 import kotlin.reflect.KClass
+import android.app.ActivityManager
 
 
 const val GOOGLE_FIT_PERMISSIONS_REQUEST_CODE = 1111
@@ -1781,8 +1782,22 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
 	    }
 
     }
-
+	fun checkForground():Boolean{
+		val activityManager = context!!.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+		val runningAppProcesses = activityManager.runningAppProcesses
+		for (processInfo in runningAppProcesses) {
+			if (processInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+				for (activeProcess in processInfo.pkgList) {
+					if (activeProcess == context!!.packageName) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
     fun getHCData(call: MethodCall, result: Result) {
+
         val dataType = call.argument<String>("dataTypeKey")!!
         val startTime = Instant.ofEpochMilli(call.argument<Long>("startTime")!!)
         var endTime = Instant.ofEpochMilli(call.argument<Long>("endTime")!!)
@@ -1792,6 +1807,31 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         val healthConnectData = mutableListOf<Map<String, Any?>>()
         scope.launch {
             MapToHCType[dataType]?.let { classType ->
+//				permission check everytime
+	            val contract = PermissionController.createRequestPermissionResultContract()
+	            val permission = HealthPermission.getReadPermission(classType)
+	            val intent = if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+							            Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS").putExtra(Intent
+			            .EXTRA_PACKAGE_NAME, context!!.packageName)
+	            } else {
+		            contract.createIntent(activity!!, setOf(permission))
+	            }
+	            val granted = healthConnectClient.permissionController.getGrantedPermissions()
+	            if(!granted.contains(permission)) {
+					if(permission !in mPermList){
+						mPermList.add(permission)
+					}
+					activity!!.startActivityForResult(intent,
+			            HEALTH_CONNECT_RESULT_CODE)
+		            result.success(false)
+		            return@launch
+	            }
+//	            Permission is granted
+
+	            if(!checkForground()){
+					result.success(false)
+		            return@launch
+				}
                 val request = ReadRecordsRequest(
                     recordType = classType,
                     timeRangeFilter = TimeRangeFilter.between(startTime, endTime),
