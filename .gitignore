@@ -26,3 +26,4 @@ example/android/gradle
 example/android/gradlew
 example/android/gradlew.bat
 example/android/local.properties
+android/.gradle/

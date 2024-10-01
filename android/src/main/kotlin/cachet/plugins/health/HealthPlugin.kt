@@ -47,6 +47,7 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry.ActivityResultListener
+import io.flutter.plugin.common.PluginRegistry.RequestPermissionsResultListener
 import io.flutter.plugin.common.PluginRegistry.Registrar
 import kotlinx.coroutines.*
 import java.time.*
@@ -59,6 +60,8 @@ import android.app.ActivityManager
 
 const val GOOGLE_FIT_PERMISSIONS_REQUEST_CODE = 1111
 const val HEALTH_CONNECT_RESULT_CODE = 16969
+const val HEALTH_CONNECT_MAIN_RESULT_CODE = 9367
+
 const val CHANNEL_NAME = "flutter_health"
 const val MMOLL_2_MGDL = 18.0 // 1 mmoll= 18 mgdl
 
@@ -68,6 +71,7 @@ const val MIN_SUPPORTED_SDK = Build.VERSION_CODES.O_MR1
 class HealthPlugin(private var channel: MethodChannel? = null) :
     MethodCallHandler,
     ActivityResultListener,
+    RequestPermissionsResultListener,
     Result,
     ActivityAware,
     FlutterPlugin {
@@ -75,7 +79,7 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
     private var handler: Handler? = null
     private var activity: Activity? = null
     private var context: Context? = null
-	private var mPermList = mutableListOf<String>()
+    private var mPermList = mutableListOf<String>()
     private var threadPoolExecutor: ExecutorService? = null
     private var useHealthConnectIfAvailable: Boolean = false
     private lateinit var healthConnectClient: HealthConnectClient
@@ -410,15 +414,33 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         handler?.post { mResult?.error(errorCode, errorMessage, errorDetails) }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray):Boolean {
+        if(requestCode == HEALTH_CONNECT_MAIN_RESULT_CODE){
+            CoroutineScope(newSingleThreadContext("health")).launch {
+                val granted = healthConnectClient.permissionController.getGrantedPermissions()
+                if (granted.containsAll(mPermList)) mResult?.success(true)
+                else mResult?.success(false)
+            }
+        }
+        return false
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-	    if (requestCode == HEALTH_CONNECT_RESULT_CODE){
-			CoroutineScope(newSingleThreadContext("health")).launch {
-				val granted = healthConnectClient.permissionController.getGrantedPermissions()
-				if(granted.containsAll(mPermList)) mResult?.success(true)
-				else mResult?.success(false)
-			}
-		}
-        else if (requestCode == GOOGLE_FIT_PERMISSIONS_REQUEST_CODE) {
+        android.util.Log.d(TAG, "onActivityResult: ")
+        if(requestCode == HEALTH_CONNECT_MAIN_RESULT_CODE){
+            CoroutineScope(newSingleThreadContext("health")).launch {
+                val granted = healthConnectClient.permissionController.getGrantedPermissions()
+                if (granted.containsAll(mPermList)) mResult?.success(true)
+                else mResult?.success(false)
+            }
+        }
+        if (requestCode == HEALTH_CONNECT_RESULT_CODE) {
+            CoroutineScope(newSingleThreadContext("health")).launch {
+                val granted = healthConnectClient.permissionController.getGrantedPermissions()
+                if (granted.containsAll(mPermList)) mResult?.success(true)
+                else mResult?.success(false)
+            }
+        } else if (requestCode == GOOGLE_FIT_PERMISSIONS_REQUEST_CODE) {
 
             if (resultCode == Activity.RESULT_OK) {
                 Log.i("FLUTTER_HEALTH", "Access Granted!")
@@ -1385,10 +1407,10 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         }
         mResult = result
 
-	    if (!healthConnectAvailable){
-			downloadHealthConnect()
-		    return
-	    }
+        if (!healthConnectAvailable) {
+            downloadHealthConnect()
+            return
+        }
         if (useHealthConnectIfAvailable && healthConnectAvailable) {
             requestAuthorizationHC(call, result)
             return
@@ -1439,123 +1461,130 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
                 result.success(false)
             }
     }
-	fun getCalculatedData(data: TotalCaloriesBurnedRecord): Double {
-		if (data.endTime <= Instant.now()) return data.energy.inKilocalories
-		val rate = data.energy.inKilocalories / (data.endTime.toEpochMilli() - data.startTime.toEpochMilli())
-		return rate * (Instant.now().toEpochMilli() - data.startTime.toEpochMilli())
-	}
 
-	private fun getTotalCaloriesInInterval(call: MethodCall, result: Result) {
-		val start = call.argument<Long>("startTime")!!
-		val end = call.argument<Long>("endTime")!!
-		if (useHealthConnectIfAvailable && healthConnectAvailable) {
-			getCaloriesHealthConnect(start, end, result)
-			return
-		}
+    fun getCalculatedData(data: TotalCaloriesBurnedRecord): Double {
+        if (data.endTime <= Instant.now()) return data.energy.inKilocalories
+        val rate =
+            data.energy.inKilocalories / (data.endTime.toEpochMilli() - data.startTime.toEpochMilli())
+        return rate * (Instant.now().toEpochMilli() - data.startTime.toEpochMilli())
+    }
 
-	}
-	private fun getTotalStepsInInterval(call: MethodCall, result: Result) {
-		val start = call.argument<Long>("startTime")!!
-		val end = call.argument<Long>("endTime")!!
+    private fun getTotalCaloriesInInterval(call: MethodCall, result: Result) {
+        val start = call.argument<Long>("startTime")!!
+        val end = call.argument<Long>("endTime")!!
+        if (useHealthConnectIfAvailable && healthConnectAvailable) {
+            getCaloriesHealthConnect(start, end, result)
+            return
+        }
 
-		if (useHealthConnectIfAvailable && healthConnectAvailable) {
-			getStepsHealthConnect(start, end, result)
-			return
-		}
+    }
 
-		val context = context ?: return
+    private fun getTotalStepsInInterval(call: MethodCall, result: Result) {
+        val start = call.argument<Long>("startTime")!!
+        val end = call.argument<Long>("endTime")!!
 
-		val stepsDataType = keyToHealthDataType(STEPS)
-		val aggregatedDataType = keyToHealthDataType(AGGREGATE_STEP_COUNT)
+        if (useHealthConnectIfAvailable && healthConnectAvailable) {
+            getStepsHealthConnect(start, end, result)
+            return
+        }
 
-		val fitnessOptions = FitnessOptions.builder()
-			.addDataType(stepsDataType)
-			.addDataType(aggregatedDataType)
-			.build()
-		val gsa = GoogleSignIn.getAccountForExtension(context, fitnessOptions)
+        val context = context ?: return
 
-		val ds = DataSource.Builder()
-			.setAppPackageName("com.google.android.gms")
-			.setDataType(stepsDataType)
-			.setType(DataSource.TYPE_DERIVED)
-			.setStreamName("estimated_steps")
-			.build()
+        val stepsDataType = keyToHealthDataType(STEPS)
+        val aggregatedDataType = keyToHealthDataType(AGGREGATE_STEP_COUNT)
 
-		val duration = (end - start).toInt()
+        val fitnessOptions = FitnessOptions.builder()
+            .addDataType(stepsDataType)
+            .addDataType(aggregatedDataType)
+            .build()
+        val gsa = GoogleSignIn.getAccountForExtension(context, fitnessOptions)
 
-		val request = DataReadRequest.Builder()
-			.aggregate(ds)
-			.bucketByTime(duration, TimeUnit.MILLISECONDS)
-			.setTimeRange(start, end, TimeUnit.MILLISECONDS)
-			.build()
+        val ds = DataSource.Builder()
+            .setAppPackageName("com.google.android.gms")
+            .setDataType(stepsDataType)
+            .setType(DataSource.TYPE_DERIVED)
+            .setStreamName("estimated_steps")
+            .build()
 
-		Fitness.getHistoryClient(context, gsa).readData(request)
-			.addOnFailureListener(
-				errHandler(
-					result,
-					"There was an error getting the total steps in the interval!",
-				),
-			)
-			.addOnSuccessListener(
-				threadPoolExecutor!!,
-				getStepsInRange(start, end, aggregatedDataType, result),
-			)
-	}
+        val duration = (end - start).toInt()
 
-	private fun getCaloriesHealthConnect(start: Long, end: Long, result: Result) = scope.launch {
-		try {
-			val startInstant = Instant.ofEpochMilli(start)
-			val endInstant = Instant.ofEpochMilli(end)
-			val response = healthConnectClient.readRecords(
-				ReadRecordsRequest(
-					TotalCaloriesBurnedRecord::class,
-					timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
-				)
-			)
-			var cal = 0.0
-			for (calories in response.records) {
-				cal += getCalculatedData(calories)
-			}
-			result.success(cal)
-		} catch (e: Exception) {
-			Log.e("FLUTTER_HEALTH::ERROR", "unable to return steps", e)
-			result.success(null)
-		}
-	}
-	private fun getStepsHealthConnect(start: Long, end: Long, result: Result) = scope.launch {
-		try {
-			val startInstant = Instant.ofEpochMilli(start)
-			val endInstant = Instant.ofEpochMilli(end)
-			val response = healthConnectClient.readRecords(
-				ReadRecordsRequest(
-					StepsRecord::class,
-					timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
-				)
-			)
-			var steps = 0L
-			for(step in response.records){
-				android.util.Log.d(TAG, "getStepsHealthConnect: ${step.metadata.dataOrigin.packageName} ${step.startTime} - ${step.endTime} :"+step.count)
-				steps += step.count
-			}
+        val request = DataReadRequest.Builder()
+            .aggregate(ds)
+            .bucketByTime(duration, TimeUnit.MILLISECONDS)
+            .setTimeRange(start, end, TimeUnit.MILLISECONDS)
+            .build()
+
+        Fitness.getHistoryClient(context, gsa).readData(request)
+            .addOnFailureListener(
+                errHandler(
+                    result,
+                    "There was an error getting the total steps in the interval!",
+                ),
+            )
+            .addOnSuccessListener(
+                threadPoolExecutor!!,
+                getStepsInRange(start, end, aggregatedDataType, result),
+            )
+    }
+
+    private fun getCaloriesHealthConnect(start: Long, end: Long, result: Result) = scope.launch {
+        try {
+            val startInstant = Instant.ofEpochMilli(start)
+            val endInstant = Instant.ofEpochMilli(end)
+            val response = healthConnectClient.readRecords(
+                ReadRecordsRequest(
+                    TotalCaloriesBurnedRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
+                )
+            )
+            var cal = 0.0
+            for (calories in response.records) {
+                cal += getCalculatedData(calories)
+            }
+            result.success(cal)
+        } catch (e: Exception) {
+            Log.e("FLUTTER_HEALTH::ERROR", "unable to return steps", e)
+            result.success(null)
+        }
+    }
+
+    private fun getStepsHealthConnect(start: Long, end: Long, result: Result) = scope.launch {
+        try {
+            val startInstant = Instant.ofEpochMilli(start)
+            val endInstant = Instant.ofEpochMilli(end)
+            val response = healthConnectClient.readRecords(
+                ReadRecordsRequest(
+                    StepsRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant)
+                )
+            )
+            var steps = 0L
+            for (step in response.records) {
+                android.util.Log.d(
+                    TAG,
+                    "getStepsHealthConnect: ${step.metadata.dataOrigin.packageName} ${step.startTime} - ${step.endTime} :" + step.count
+                )
+                steps += step.count
+            }
 //			val response = healthConnectClient.aggregate(
 //				AggregateRequest(
 //					metrics = setOf(StepsRecord.COUNT_TOTAL),
 //					timeRangeFilter = TimeRangeFilter.between(startInstant, endInstant),
 //				),
 //			)
-			// The result may be null if no data is available in the time range.
+            // The result may be null if no data is available in the time range.
 //			val stepsInInterval = response[StepsRecord.COUNT_TOTAL] ?: 0L
 
 //			android.util.Log.i(TAG, "getStepsHealthConnect: "+response)
 //			Log.i("FLUTTER_HEALTH::SUCCESS", "returning $stepsInInterval steps")
-			result.success(steps)
-		} catch (e: Exception) {
-			Log.i("FLUTTER_HEALTH::ERROR", "unable to return steps")
-			result.success(null)
-		}
-	}
+            result.success(steps)
+        } catch (e: Exception) {
+            Log.i("FLUTTER_HEALTH::ERROR", "unable to return steps")
+            result.success(null)
+        }
+    }
 
-	private fun getStepsInRange(
+    private fun getStepsInRange(
         start: Long,
         end: Long,
         aggregatedDataType: DataType,
@@ -1605,8 +1634,8 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
             "getData" -> getData(call, result)
             "writeData" -> writeData(call, result)
             "delete" -> delete(call, result)
-	        "getTotalStepsInInterval" -> getTotalStepsInInterval(call, result)
-	        "getTotalCaloriesInInterval" -> getTotalCaloriesInInterval(call, result)
+            "getTotalStepsInInterval" -> getTotalStepsInInterval(call, result)
+            "getTotalCaloriesInInterval" -> getTotalCaloriesInInterval(call, result)
             "writeWorkoutData" -> writeWorkoutData(call, result)
             "writeBloodPressure" -> writeBloodPressure(call, result)
             "writeBloodOxygen" -> writeBloodOxygen(call, result)
@@ -1620,6 +1649,7 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
             return
         }
         binding.addActivityResultListener(this)
+        binding.addRequestPermissionsResultListener(this)
         activity = binding.activity
     }
 
@@ -1644,25 +1674,26 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
     var healthConnectAvailable = false
     var healthConnectStatus = HealthConnectClient.SDK_UNAVAILABLE
 
-	fun downloadHealthConnect(){
-		val healthConnectStatus = HealthConnectClient.getSdkStatus(context!!)
-		healthConnectAvailable = healthConnectStatus == HealthConnectClient.SDK_AVAILABLE
-		if(healthConnectAvailable) healthConnectClient = HealthConnectClient.getOrCreate(context!!)
-		if (healthConnectStatus == HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED) {
-			// Optionally redirect to package installer to find a provider, for example:
-			val uriString =
-				"market://details?id=com.google.android.apps.healthdata&url=healthconnect%3A%2F%2Fonboarding"
-			activity!!.startActivity(
-				Intent(Intent.ACTION_VIEW).apply {
-					setPackage("com.android.vending")
-					data = Uri.parse(uriString)
-					putExtra("overlay", true)
-					putExtra("callerId", context!!.packageName)
-				}
-			)
-			return
-		}
-	}
+    fun downloadHealthConnect() {
+        val healthConnectStatus = HealthConnectClient.getSdkStatus(context!!)
+        healthConnectAvailable = healthConnectStatus == HealthConnectClient.SDK_AVAILABLE
+        if (healthConnectAvailable) healthConnectClient = HealthConnectClient.getOrCreate(context!!)
+        if (healthConnectStatus == HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED) {
+            // Optionally redirect to package installer to find a provider, for example:
+            val uriString =
+                "market://details?id=com.google.android.apps.healthdata&url=healthconnect%3A%2F%2Fonboarding"
+            activity!!.startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setPackage("com.android.vending")
+                    data = Uri.parse(uriString)
+                    putExtra("overlay", true)
+                    putExtra("callerId", context!!.packageName)
+                }
+            )
+            return
+        }
+    }
+
     fun checkAvailability() {
         healthConnectStatus = HealthConnectClient.getSdkStatus(context!!)
         healthConnectAvailable = healthConnectStatus == HealthConnectClient.SDK_AVAILABLE
@@ -1768,70 +1799,86 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         val contract = PermissionController.createRequestPermissionResultContract()
 
 
-	    val intent = if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-		    Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS").putExtra(Intent
-				.EXTRA_PACKAGE_NAME, context!!.packageName)
-	    } else {
-		    contract.createIntent(activity!!, permList.toSet())
-	    }
-	    mPermList = permList
-	    CoroutineScope(newSingleThreadContext("health")).launch {
-		    val granted = healthConnectClient.permissionController.getGrantedPermissions()
-		    if(granted.containsAll(permList)) result.success(true)
-		    else activity!!.startActivityForResult(intent, HEALTH_CONNECT_RESULT_CODE)
-	    }
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS").putExtra(
+                Intent
+                    .EXTRA_PACKAGE_NAME, context!!.packageName
+            )
+        } else {
+            contract.createIntent(activity!!, permList.toSet())
+        }
+        mPermList = permList
+        CoroutineScope(newSingleThreadContext("health")).launch {
+
+            val granted = healthConnectClient.permissionController.getGrantedPermissions()
+            if (granted.containsAll(permList)) result.success(true)
+            else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    activity!!.requestPermissions(mPermList.toTypedArray(), HEALTH_CONNECT_MAIN_RESULT_CODE)
+                    return@launch
+                }
+                activity!!.startActivityForResult(intent, HEALTH_CONNECT_RESULT_CODE)
+            }
+        }
 
     }
-	fun checkForground():Boolean{
-		val activityManager = context!!.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-		val runningAppProcesses = activityManager.runningAppProcesses
-		for (processInfo in runningAppProcesses) {
-			if (processInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
-				for (activeProcess in processInfo.pkgList) {
-					if (activeProcess == context!!.packageName) {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
+
+    fun checkForground(): Boolean {
+        val activityManager =
+            context!!.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val runningAppProcesses = activityManager.runningAppProcesses
+        for (processInfo in runningAppProcesses) {
+            if (processInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                for (activeProcess in processInfo.pkgList) {
+                    if (activeProcess == context!!.packageName) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     fun getHCData(call: MethodCall, result: Result) {
 
         val dataType = call.argument<String>("dataTypeKey")!!
         val startTime = Instant.ofEpochMilli(call.argument<Long>("startTime")!!)
         var endTime = Instant.ofEpochMilli(call.argument<Long>("endTime")!!)
-	    // As TimeRangeFilter.between is exclusive, add 1 millisecond to endTime
-	    if(startTime == endTime) endTime = endTime.plus(1, ChronoUnit.MILLIS)
+        // As TimeRangeFilter.between is exclusive, add 1 millisecond to endTime
+        if (startTime == endTime) endTime = endTime.plus(1, ChronoUnit.MILLIS)
 //	    println("getHCData: $dataType $startTime - $endTime")
         val healthConnectData = mutableListOf<Map<String, Any?>>()
         scope.launch {
             MapToHCType[dataType]?.let { classType ->
 //				permission check everytime
-	            val contract = PermissionController.createRequestPermissionResultContract()
-	            val permission = HealthPermission.getReadPermission(classType)
-	            val intent = if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-							            Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS").putExtra(Intent
-			            .EXTRA_PACKAGE_NAME, context!!.packageName)
-	            } else {
-		            contract.createIntent(activity!!, setOf(permission))
-	            }
-	            val granted = healthConnectClient.permissionController.getGrantedPermissions()
-	            if(!granted.contains(permission)) {
-					if(permission !in mPermList){
-						mPermList.add(permission)
-					}
-					activity!!.startActivityForResult(intent,
-			            HEALTH_CONNECT_RESULT_CODE)
-		            result.success(false)
-		            return@launch
-	            }
+                val contract = PermissionController.createRequestPermissionResultContract()
+                val permission = HealthPermission.getReadPermission(classType)
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    Intent("android.health.connect.action.MANAGE_HEALTH_PERMISSIONS").putExtra(
+                        Intent
+                            .EXTRA_PACKAGE_NAME, context!!.packageName
+                    )
+                } else {
+                    contract.createIntent(activity!!, setOf(permission))
+                }
+                val granted = healthConnectClient.permissionController.getGrantedPermissions()
+                if (!granted.contains(permission)) {
+                    if (permission !in mPermList) {
+                        mPermList.add(permission)
+                    }
+                    activity!!.startActivityForResult(
+                        intent,
+                        HEALTH_CONNECT_RESULT_CODE
+                    )
+                    result.success(false)
+                    return@launch
+                }
 //	            Permission is granted
 
-	            if(!checkForground()){
-					result.success(false)
-		            return@launch
-				}
+                if (!checkForground()) {
+                    result.success(false)
+                    return@launch
+                }
                 val request = ReadRecordsRequest(
                     recordType = classType,
                     timeRangeFilter = TimeRangeFilter.between(startTime, endTime),
@@ -1892,42 +1939,44 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
                         )
                     }
                     // Filter sleep stages for requested stage
-				}
-                else if (classType == SleepSessionRecord::class) {
-	                for (rec in response.records) {
-		                if (rec is SleepSessionRecord) {
-							healthConnectData.addAll(convertRecord(rec, dataType))
-		                }
-	                }
-                }
-                else if(classType == TotalCaloriesBurnedRecord::class){
-
-	                android.util.Log.d(TAG, "getHCData:TOTAL_ENERGY_BURNED" +
-			                "${startTime} - ${endTime} -> ${response.records.size}")
-	                for (rec in response.records) {
-//						if (rec is TotalCaloriesBurnedRecord::class) {
-			                val data = rec as TotalCaloriesBurnedRecord
-			                if (data.endTime <= Instant.now()){
-
-								healthConnectData.add(
-									mapOf<String, Any>(
-										"value" to data.energy.inKilocalories,
-										"date_from" to data.startTime.toEpochMilli(),
-										"date_to" to data.endTime.toEpochMilli(),
-										"source_id" to "",
-										"source_name" to data.metadata.dataOrigin.packageName,
-									)
-								)
-			                }
-//						}
-	                }
-                }
-                else {
+                } else if (classType == SleepSessionRecord::class) {
                     for (rec in response.records) {
-						if(classType == DistanceRecord::class){
-							val d = rec as DistanceRecord
-		                    Log.d("TAG", "readDistanceDeltaByTimeRange: ${d.startTime} - ${d.endTime} : ${d.distance.inMeters}")
-	                    }
+                        if (rec is SleepSessionRecord) {
+                            healthConnectData.addAll(convertRecord(rec, dataType))
+                        }
+                    }
+                } else if (classType == TotalCaloriesBurnedRecord::class) {
+
+                    android.util.Log.d(
+                        TAG, "getHCData:TOTAL_ENERGY_BURNED" +
+                                "${startTime} - ${endTime} -> ${response.records.size}"
+                    )
+                    for (rec in response.records) {
+//						if (rec is TotalCaloriesBurnedRecord::class) {
+                        val data = rec as TotalCaloriesBurnedRecord
+                        if (data.endTime <= Instant.now()) {
+
+                            healthConnectData.add(
+                                mapOf<String, Any>(
+                                    "value" to data.energy.inKilocalories,
+                                    "date_from" to data.startTime.toEpochMilli(),
+                                    "date_to" to data.endTime.toEpochMilli(),
+                                    "source_id" to "",
+                                    "source_name" to data.metadata.dataOrigin.packageName,
+                                )
+                            )
+                        }
+//						}
+                    }
+                } else {
+                    for (rec in response.records) {
+                        if (classType == DistanceRecord::class) {
+                            val d = rec as DistanceRecord
+                            Log.d(
+                                "TAG",
+                                "readDistanceDeltaByTimeRange: ${d.startTime} - ${d.endTime} : ${d.distance.inMeters}"
+                            )
+                        }
                         healthConnectData.addAll(convertRecord(rec, dataType))
                     }
                 }
@@ -1989,7 +2038,8 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
                     "source_name" to metadata.dataOrigin.packageName,
                 ),
             )
-	        is TotalCaloriesBurnedRecord -> return listOf(
+
+            is TotalCaloriesBurnedRecord -> return listOf(
                 mapOf<String, Any>(
                     "value" to record.energy.inKilocalories,
                     "date_from" to record.startTime.toEpochMilli(),
@@ -2078,6 +2128,7 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
                     "source_name" to metadata.dataOrigin.packageName,
                 ),
             )
+
             is RestingHeartRateRecord -> return listOf(
                 mapOf<String, Any>(
                     "value" to record.beatsPerMinute,
@@ -2447,7 +2498,7 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         BASAL_ENERGY_BURNED to BasalMetabolicRateRecord::class,
         FLIGHTS_CLIMBED to FloorsClimbedRecord::class,
         RESPIRATORY_RATE to RespiratoryRateRecord::class,
-	    SLEEP_ASLEEP to SleepSessionRecord::class,
+        SLEEP_ASLEEP to SleepSessionRecord::class,
         // MOVE_MINUTES to TODO: Find alternative?
         // TODO: Implement remaining types
         // "ActiveCaloriesBurned" to ActiveCaloriesBurnedRecord::class,
